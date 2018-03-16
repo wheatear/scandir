@@ -1,0 +1,317 @@
+#!/usr/bin/env python
+#coding=gbk
+"""emergency provisioning ps control model"""
+
+import sys
+import os
+import time
+import multiprocessing
+import Queue
+import signal
+# import cx_Oracle as orcl
+import socket
+import hostdirs
+from multiprocessing.managers import BaseManager
+import pexpect
+import pexpect.pxssh
+import base64
+import random
+from config import *
+
+class ScanDirServer(multiprocessing.Process):
+    'refresh scan item every day'
+    def __init__(self,cfg):
+        multiprocessing.Process.__init__(self)
+        self.cfg = cfg
+        self.localIp = ''
+        self.dClus = {}
+        self.dDirs = {}
+        self.dBusis = {}
+        self.aSanClus = []
+        self.aBlockHostDirs = []
+        self.aErrHostDirs = []
+
+    def startManager(self):
+        queue = multiprocessing.Queue()
+        DirsManager.register('getQueue', callable=lambda: queue)
+        ma = DirsManager(address=('10.4.86.11', 50000), authkey='scandirmang')
+        ma.start()
+        self.manager = ma
+
+    def getAllDirs(self):
+        fDirs = open(self.cfg.hostDirs, 'r')
+        for line in fDirs:
+            line = line.strip()
+            if len(line) == 0:
+                continue
+            aInfo = line.split(' ')
+            dirKey = '%s:%s' % (aInfo[0],aInfo[2])
+            self.dClus[aInfo[0]] = 1
+            self.dDirs[dirKey] = aInfo[1]
+        self.loger.writeLog('cluster: %s' % ( self.dClus.keys()),'DEBUG')
+        self.loger.writeLog('dirs: %s' % ( self.dDirs.keys()),'DEBUG')
+        fDirs.close()
+
+    def recvDir(self):
+        sql = "insert into SCANDIR_DIRFILES(CLUSTER_CODE,BUSS_TYPE,path,file_count,checktime,flag,remark) values(:1,:2,:3,:4,to_date(:5,'yyyymmddhh24miss'),:6,:7)"
+        cur = self.cfg.db.cursor()
+        cur.prepare(sql)
+        dirQueue = self.manager.getQueue()
+        tryNum = 360
+        tryNum = 3
+        i = 0
+        # aSanClus = []
+        # aBlockHostDirs = []
+        # aErrHostDirs = []
+        # hostDirs = None
+        while 1:
+            try:
+                hostDirs = dirQueue.get_nowait()
+            except Queue.Empty,e:
+                i += 1
+                if i > tryNum:
+                    self.loger.writeLog('There are %d clusters(%s) no result after try %d times, exit.' % (len(self.dClus),self.dClus.keys(),tryNum))
+                    break
+                time.sleep(30)
+                continue
+                self.loger.writeLog('get dir filenum of cluster(%s): %s' % (hostDirs.cluster,hostDirs.dirs))
+            self.loger.writeLog( 'cluster: %s' % (self.dClus.keys()))
+            self.aSanClus.append(self.dClus.pop(hostDirs.cluster))
+            (blockDirs,errDirs) = self.processHost(hostDirs,cur)
+            if blockDirs is not None and len(blockDirs.dirs) > 0:
+                self.aBlockHostDirs.append(blockDirs)
+            if errDirs is not None and len(errDirs.dirs) > 0:
+                self.aErrHostDirs.append(errDirs)
+            if not self.dClus:
+                self.loger.writeLog( 'all cluster has done.')
+                break
+        cur.close()
+
+        self.loger.writeLog('block hostdirs: %d.' % len(self.aBlockHostDirs))
+        if len(self.aBlockHostDirs) > 0:
+            blocks = ''
+            for block in self.aBlockHostDirs:
+                blocks = '%s: %s; %s' % (block.cluster,block.dirs.keys(),blocks)
+            self.loger.writeLog('block hostdirs: %s.' % blocks)
+
+        self.loger.writeLog('error hostdirs: %d.' % len(self.aErrHostDirs))
+        if len(self.aErrHostDirs) > 0:
+            errs = ''
+            for err in self.aErrHostDirs:
+                errs = '%s: %s; %s' % (err.cluster, err.dirs.keys(), errs)
+            self.loger.writeLog('err hostdirs: %s.' % errs)
+            # self.loger.writeLog('error hostdirs: %s.' % ' '.join(self.aErrHostDirs))
+
+    def processHost(self,hostdirfiles,cur):
+        clus = hostdirfiles.cluster
+        hostIp = hostdirfiles.ip
+        dDirs = hostdirfiles.dirs
+        flag = 0
+        blockDirs = hostdirs.HostDirs()
+        errDirs = hostdirs.HostDirs()
+        blockDirs.cluster = clus
+        blockDirs.ip = hostIp
+        errDirs.cluster = clus
+        for (d,(bsType,stime,fileNum)) in dDirs.items():
+            flag = 0
+            k = '%s:%s' % (clus, d)
+            self.loger.writeLog('threshold key: %s' % (k))
+            if k in self.dDirThrsh:
+                (bussType, thrsh) = self.dDirThrsh[k]
+                self.loger.writeLog('threshold: %s %s' % (bussType, thrsh))
+            else:
+                # bussKey = '%s:%s' % (clus, d)
+                # if bussKey in self.dDirs:
+                #     bussType = self.dDirs[bussKey]
+                # else:
+                #     bussType = 'TEST'
+                bussType = bsType
+                thrsh = 1000
+                self.loger.writeLog('threshold: %s %s' % (bussType, thrsh))
+            self.loger.writeLog('process dir: %s %s %s %s %s' % (clus, bussType, d, str(fileNum), stime))
+            if str(fileNum).find('Err') > -1:
+                self.loger.writeLog( 'ERR: %s %s %s %s' % (clus,d,stime,fileNum))
+                flag = 2
+                errDirs.dirs[d] = (bussType,stime,fileNum)
+                cur.execute(None, (clus, bussType, d, None, stime, flag, fileNum))
+                cur.connection.commit()
+                continue
+            # val = self.dDirThrsh[k]
+            # print 'threshold: %s' % val
+            # bussType = val[0]
+            # thrsh = val[1]
+            if fileNum > thrsh:
+                flag = 1
+                blockDirs.dirs[d] = (bussType,stime,fileNum)
+                self.loger.writeLog( 'warn: %s %s %s %d %s %d' % ( clus,bussType,d,fileNum,stime,flag))
+            cur.execute(None,(clus,bussType,d,int(fileNum),stime,flag,''))
+            cur.connection.commit()
+        if not blockDirs.dirs:
+            blockDirs = None
+        else:
+            self.parseBlockBusi(blockDirs)
+        if not errDirs.dirs:
+            errDirs = None
+        return (blockDirs,errDirs)
+
+    def parseBlockBusi(self,blockdirs):
+        clus = blockdirs.cluster
+        blockBusis = blockdirs.getBusiDic()
+        for (busi,blockNum) in blockBusis.items():
+            blocks = '%s_%d' % (clus,blockNum)
+            if busi in self.dBusis:
+                self.dBusis[busi].append(blocks)
+            else:
+                self.dBusis[busi] = [blocks]
+
+
+    def getThreshold(self):
+        sql = 'select CLUSTER_CODE,BUSS_TYPE,path,THRESHOLD from SCANDIR_THRESHOLD'
+        # self.cfg.getDb()
+        cur = self.cfg.db.cursor()
+        cur.execute(sql)
+        self.dDirThrsh = {}
+        for row in cur:
+            self.loger.writeLog( 'threshold: %s %s' % (row[2],row[3]))
+            k = '%s:%s' % (row[0],row[2])
+            self.dDirThrsh[k] = (row[1],row[3])
+        cur.close()
+
+    def run(self):
+        # self.pid = os.getpid()
+        self.loger.openLog('%s/SCANSERVER.log' % self.cfg.logDir)
+        self.loger.writeLog('scan server starting...')
+        self.getLocalIp()
+        self.startManager()
+        self.getAllDirs()
+        self.getThreshold()
+        self.recvDir()
+        self.sendAlm()
+
+    def sendAlm(self):
+        msgHead = '%s%d%s' % ('"Ñ²¼ì',len(self.aSanClus),'¸ö¼¯Èº,')
+        msgBody = ''
+        bodyLen = 512 - len(msgHead)
+        if len(self.dBusis) == 0:
+            msgBody = 'no block"'
+        else:
+            msgBodyPre = 'blocks: '
+            msgBody = ''
+            bodyLen = bodyLen - len(msgBody)
+            for (bu,clus) in self.dBusis.items():
+                sBlockClus = ','.join(clus)
+                sBlockBu = '%s:%s;' % (bu,sBlockClus)
+                msgBody = '%s%s' % (msgBody,sBlockBu)
+            msgBody = '%s%s"' % (msgBodyPre,msgBody)
+        msg = '%s%s' % (msgHead,msgBody)
+        sTime = time.strftime("%Y-%m-%d_%H:%M:%S", time.localtime())
+        instanceId = random.randint(100000,999999)
+        trapCmd = '/nms/almd/opt/newtrap/trap4j.sh 9001.219 %s scandir 20179000_MAJOR %d 20179000_MAJOR,%s 1 "default8" %s' % (self.localIp,instanceId,msg,sTime)
+        #trapCmd = '/nms/almd/opt/newtrap/trap4j.sh 9001.219 %s scandir 12345678_MAJOR "%d" 20179000_MAJOR,%s 1 "default8" %s' % (self.localIp,instanceId,msg,sTime)
+        self.loger.writeLog('trapcmd: %s' % (trapCmd))
+        os.system(trapCmd)
+
+
+    def getLocalIp(self):
+        self.hostname = socket.gethostname()
+        self.loger.writeLog('local host: %s' % (self.hostname))
+        self.localIp = socket.gethostbyname(self.hostname)
+        self.loger.writeLog('local host ip: %s' % (self.localIp))
+        return self.localIp
+
+
+class StartClient(multiprocessing.Process):
+    def __init__(self,cfg,serverip):
+        multiprocessing.Process.__init__(self)
+        self.cfg = cfg
+        self.serverIp = serverip
+        self.aClus = []
+        self.cmdUser = 'nms'
+        self.cmdPwd = 'ailk,123'
+
+    def run(self):
+        self.loger.openLog('%s/CLIENTCALLER.log' % self.cfg.logDir)
+        self.loger.writeLog('client starter(%d) running' % os.getpid())
+        self.startAll()
+
+    def getAllClus(self):
+        fClus = open(self.cfg.cluster, 'r')
+        for line in fClus:
+            line = line.strip()
+            if len(line) == 0:
+                continue
+            aInfo = line.split(' ')
+            self.aClus.append(aInfo)
+        fClus.close()
+
+    def startAll(self):
+        self.getAllClus()
+        self.getLocalIp()
+        self.loger.writeLog('all cluster to connect: %s' % (self.aClus))
+        aHosts = self.aClus
+        for h in aHosts:
+            h.append(self.localIp)
+            self.loger.writeLog('run client %s@%s(%s)' % (h[2],h[0],h[1]))
+            self.runClient(*h)
+
+    def runClient(self,cluster_code,float_ip,user_name,user_pw,serv_ip):
+        clt = pexpect.pxssh.pxssh(timeout=300)
+        flog = open('../log/pxssh.log','w')
+        clt.logfile = flog
+        self.loger.writeLog('connect to cluster: %s %s %s' % (cluster_code,float_ip,user_name))
+        plain_pw = base64.decodestring(user_pw)
+        # plain_pw = user_pw
+        con = clt.login(float_ip,user_name,plain_pw)
+        # con = clt.login(float_ip, self.cmdUser, self.cmdPwd)
+        self.loger.writeLog('connect: %s' % (con))
+        # cltcmd = '/usr/bin/ksh -c "nohup /nms/scandir/bin/scandirclient.py %s &"' % serv_ip
+        #cltcmd = 'sh -c "nohup python /jfdata01/kt/operation/test/python/scandir/bin/scandirclient.py %s &"' % serv_ip
+        cltcmd = 'sh -c "nohup python /nms/scandir/bin/scandirclient.py %s &"' % serv_ip
+        self.loger.writeLog('execute: %s' % (cltcmd))
+        # clt.sendline('/usr/bin/ksh -c "nohup /nms/scandir/bin/scandirclient.py &"')
+        clt.sendline(cltcmd)
+        clt.prompt()
+        self.loger.writeLog('exec: %s' % (clt.before))
+
+    def getLocalIp(self):
+        self.hostname = socket.gethostname()
+        self.loger.writeLog('local host: %s' % (self.hostname))
+        self.localIp = socket.gethostbyname(self.hostname)
+        self.loger.writeLog('local host ip: %s' % (self.localIp))
+        return self.localIp
+
+
+class DirsManager(BaseManager):
+    pass
+
+
+def main():
+    callName = sys.argv[0]
+    cfg = Conf(callName)
+    loger = LogWriter(cfg)
+    loger.writeLog('connect to oracle')
+    cfg.getDb()
+    # baseName = os.path.basename(callName)
+    # sysName = os.path.splitext(baseName)[0]
+    # logFile = '%s/%s%s' % ('../log', sysName, '.log')
+    # cfgFile = '%s.cfg' % 'scandir'
+    # cfgFile = '%s.cfg' % 'scandir'
+    # cfg = Conf(cfgFile)
+    serv = ScanDirServer(cfg)
+    serv.loger = loger
+    serv.start()
+    serverIp = serv.localIp
+    loger.writeLog('server ip: %s' % serverIp)
+
+    startClit = StartClient(cfg,serverIp)
+    startClit.loger = loger
+    startClit.start()
+
+    startClit.join()
+    serv.join()
+
+
+    # dirManager = startManager()
+
+if __name__ == '__main__':
+    main()

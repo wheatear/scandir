@@ -1,0 +1,4 @@
+cd /nms
+
+mkdir local
+

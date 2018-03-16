@@ -1,0 +1,45 @@
+-- Create table
+create table SCANDIR_DIRFILES
+(
+  CLUSTER_CODE      VARCHAR2(20),
+  BUSS_TYPE            VARCHAR2(64),
+  path      VARCHAR2(200),
+  file_count NUMBER(30),
+  checktime DATE,
+  flag      NUMBER(5),
+  remark    VARCHAR2(200)
+);
+
+create table SCANDIR_DIR
+(
+  CLUSTER_CODE      VARCHAR2(20),
+  BUSS_TYPE            VARCHAR2(64),
+  path      VARCHAR2(200),
+  TYPE      NUMBER(5)
+);
+
+create table SCANDIR_THRESHOLD
+(
+  CLUSTER_CODE      VARCHAR2(20),
+  BUSS_TYPE            VARCHAR2(64),
+  path      VARCHAR2(200),
+  THRESHOLD NUMBER(30)
+);
+
+create table SCANDIR_CLUSTER
+(
+  CLUSTER_CODE      VARCHAR2(20),
+  CLUSTER_NAME            VARCHAR2(100),
+  FLOAT_IP      VARCHAR2(64),
+  USER_NAME          VARCHAR2(20),
+  USER_PW        VARCHAR2(20)
+);
+
+create table SCANDIR_HOST
+(
+  HOST_NAME      VARCHAR2(20),
+  VM_IP            VARCHAR2(64),
+  CLUSTER_CODE      VARCHAR2(20),
+  USER_NAME          VARCHAR2(20),
+  USER_PW        VARCHAR2(20)
+);
