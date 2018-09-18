@@ -255,18 +255,21 @@ class StartClient(multiprocessing.Process):
             self.runClient(*h)
 
     def runClient(self,cluster_code,float_ip,user_name,user_pw,serv_ip):
-        clt = pexpect.pxssh.pxssh(timeout=300)
         flog = open('../log/pxssh.log','w')
-        clt.logfile = flog
         self.loger.writeLog('connect to cluster: %s %s %s' % (cluster_code,float_ip,user_name))
         plain_pw = base64.decodestring(user_pw)
         # plain_pw = user_pw
         for i in range(2):
             try:
+                clt = pexpect.pxssh.pxssh(timeout=300)
+                clt.logfile = flog
                 con = clt.login(float_ip,user_name,plain_pw)
             except pexpect.pxssh.ExceptionPxssh, e:
                 if i < 1:
                     self.loger.writeLog('connect %s %s %s error: ' % (cluster_code, float_ip, user_name, e))
+                    sshkeygen = 'ssh-keygen -R %s' % float_ip
+                    os.system(sshkeygen)
+                    # clt = pexpect.pxssh.pxssh(timeout=300)
                 else:
                     self.loger.writeLog('connect %s %s %s error: ' % (cluster_code, float_ip, user_name, e))
                     return 
