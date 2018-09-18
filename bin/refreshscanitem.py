@@ -142,7 +142,7 @@ class RefreshScanItem(object):
         aHosts = self.aHosts
         for h in aHosts:
             for fi in files:
-                if self.scpFile(fi, h[2], h[3], h[0], remotepath):
+                if self.scpFile(fi, self.cmdUser, self.cmdPwd, h[0], remotepath):
                     self.loger.writeLog( 'put file:%s to cluster:%s(%s) ok.' % (fi,h[0], h[1]))
                 else:
                     self.loger.writeLog('put file:%s to cluster:%s(%s) failed.' % (fi,h[0], h[1]))
@@ -155,8 +155,8 @@ class RefreshScanItem(object):
             pscp.logfile = sys.stdout
             index = pscp.expect(['assword:', pexpect.EOF])
             if index == 0:
-                pscp.sendline(base64.decodestring(rpasswd))
-                # pscp.sendline(self.cmdPwd)
+                # pscp.sendline(base64.decodestring(rpasswd))
+                pscp.sendline(self.cmdPwd)
             elif index == 1:
                 return self.parseResp(pscp)
             index = pscp.expect(['assword:', pexpect.EOF])

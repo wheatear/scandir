@@ -261,7 +261,16 @@ class StartClient(multiprocessing.Process):
         self.loger.writeLog('connect to cluster: %s %s %s' % (cluster_code,float_ip,user_name))
         plain_pw = base64.decodestring(user_pw)
         # plain_pw = user_pw
-        con = clt.login(float_ip,user_name,plain_pw)
+        for i in range(2):
+            try:
+                con = clt.login(float_ip,user_name,plain_pw)
+            except pexpect.pxssh.ExceptionPxssh, e:
+                if i < 1:
+                    self.loger.writeLog('connect %s %s %s error: ' % (cluster_code, float_ip, user_name, e))
+                else:
+                    self.loger.writeLog('connect %s %s %s error: ' % (cluster_code, float_ip, user_name, e))
+                    return 
+
         # con = clt.login(float_ip, self.cmdUser, self.cmdPwd)
         self.loger.writeLog('connect: %s' % (con))
         # cltcmd = '/usr/bin/ksh -c "nohup /nms/scandir/bin/scandirclient.py %s &"' % serv_ip
